@@ -1,0 +1,267 @@
+experimirements: 1
+facebook/convnext-xlarge-384-22k-1
+
+loss crossentropy loss with oversampling weight
+
+For the model, I  use ConvNextForImageClassification with num_labels=4 and ignore_mismatched_sizes=True to adapt the pretrained weights to our 4-class dataset.
+I freezed the backbone and only train the classifier head. I used convnext-xlarge-384-22k-1k with 384x384 image size.
+
+
+
+For the model loading, I'll use ConvNextForImageClassification with the xlarge variant and set num_labels=4 while ignoring size mismatches. 
+30 epoch:
+
+Confusion breakdown (row=true, col=predicted, values=count):
+              excavator  train  train_tracks  workers
+excavator           156      2             0        2
+train                 0     29             0        0
+train_tracks          0      0            32        0
+workers               5      8             0      179
+
+Class mean loss
+excavator  0.35        
+train       0.04       
+train_tracks 0.1       
+workers  0.42   
+my model is struggling on this cases. and in most cases objects are very tiny
+
+
+
+
+experimirements: 2
+facebook/convnext-xlarge-384-22k-1
+experiments: focal loss 
+
+Focal Loss (gamma=2)
+The model was confident on excavator (loss 0.35) and very confident on train/train_tracks (0.04/0.1) — standard CE kept rewarding those easy correct predictions.
+ Focal Loss multiplies each sample's loss by (1 − p_t)², so easy correct predictions contribute almost nothing to the gradient and the 13 confused workers
+  samples get ~20× more training signal relative to the easy ones.
+
+Crop scale (0.5→0.2, 1.0)
+At scale=0.5 minimum, the model never sees an object occupying less than ~50% of the image area during training, but at inference the tiny workers 
+in wide-angle shots might occupy 5-10%. Dropping to 0.2 means the model is explicitly trained on scenes where the target is small — it learns to distinguish 
+"worker standing next to a train" vs "just a train" at realistic scale.
+
+What to watch: the workers F1 score specifically (not overall accuracy). If it goes from ~0.90 to ~0.95+ the fix is working. 
+If workers→train confusion persists after retraining, the next step would be hard-negative mining or collecting more workers-near-train training images.
+
+best accuracy :epochs[8/20]  tr_loss=0.0008  tr_acc=0.9143  vl_loss=0.0007  vl_acc=0.9467  vl_f1=0.9412
+
+            precision    recall  f1-score   support
+
+   excavator       0.97      0.94      0.95       160
+       train       0.91      1.00      0.95        29
+train_tracks       0.84      1.00      0.91        32
+     workers       0.96      0.94      0.95       192
+
+    accuracy                           0.95       413
+   macro avg       0.92      0.97      0.94       413
+weighted avg       0.95      0.95      0.95       413
+
+
+
+Confusion breakdown (row=true, col=predicted, values=count):
+              excavator  train  train_tracks  workers
+excavator           150      0             2        8
+train                 0     29             0        0
+train_tracks          0      0            32        0
+workers               5      3             4      180
+
+Class mean loss
+excavator  0.35        
+train       0.04       
+train_tracks 0.1       
+workers  0.42
+
+
+excavator    0.3900
+train        0.0646
+train_tracks 0.0729
+workers      0.3597
+
+
+
+experimirements: 3
+facebook/convnext-xlarge-384-22k-1
+Why only stages 2 & 3?
+ConvNeXt has 4 stages. Stages 0–1 learn low-level edges/textures (universal, no need to touch them). Stages 2–3 learn semantic mid/high-level features — exactly where "worker holding a shovel near an excavator" vs "just an excavator" gets encoded. Unfreezing only these keeps training stable and avoids catastrophic forgetting of the ImageNet features.
+
+Why lr=1e-5 (100× lower)?
+The backbone weights are already well-trained on ImageNet. A high LR would destroy them. At 1e-5 you're nudging the representations to distinguish your specific confusion cases, not relearning from scratch.
+
+Why batch_size=8?
+More parameters are now accumulating gradients — halving the batch keeps you within VRAM budget. On an H100 you likely have headroom, but 8 is safe.
+
+What to expect: the excavator↔workers confusion (13 cases total) should drop significantly because the backbone will learn that "worker pixels" have human-shaped features even when surrounded by excavator context.
+
+
+
+1st stage best acc:  [ 14/20]  tr_loss=0.0006  tr_acc=0.9535  vl_loss=0.0006  vl_acc=0.9395  vl_f1=0.9228  ← saved
+
+2nd stage best acc:   [3/20]  tr_loss=0.0005  tr_acc=0.9607  vl_loss=0.0005  vl_acc=0.9637  vl_f1=0.9534  ← saved
+
+
+
+             precision    recall  f1-score   support
+
+   excavator       0.97      0.97      0.97       160
+       train       0.83      1.00      0.91        29
+train_tracks       0.94      1.00      0.97        32
+     workers       0.98      0.94      0.96       192
+
+    accuracy                           0.96       413
+   macro avg       0.93      0.98      0.95       413
+weighted avg       0.97      0.96      0.96       413
+
+Confusion breakdown (row=true, col=predicted, values=count):
+              excavator  train  train_tracks  workers
+excavator           156      1             0        3
+train                 0     29             0        0
+train_tracks          0      0            32        0
+workers               4      5             2      181
+
+
+mean loss:
+excavator    0.4260
+train        0.0460
+train_tracks 0.0714
+workers      0.4276
+
+Test_set Leadearboard accuracy: 0.955    Leadearboard N#1 accuracy: 0.981
+
+
+
+
+experimirements: 3
+Model MODEL_NAME  = 'facebook/dinov3-vitl16-pretrain-lvd1689m'
+path to notebok: /data/max/kaggle/railway/train_dinov3.ipynb
+Structure (14 cells):
+
+Cell	Purpose
+0	Imports: AutoModel, sklearn, v2, etc.
+1	Constants: IM_SIZE=518, BATCH_SIZE=8, MODEL_NAME
+2	Class distribution plot
+3	FocalLoss (gamma=2, label smoothing=0.1)
+4	Transforms + 3-way stratified split (70/15/15)
+5	TTALabeledDataset + TTAUnlabeledDataset — both return [B, N_TTA, C, H, W]
+6	Sample batch visualization
+7	get_dinov3_model() + dino_forward() — CLS token → head
+8	trainer() — AMP, FocalLoss, saves on best val_acc
+9	plot_metrics()
+10	Stage 1: head only, 20 epochs, lr=1e-3
+11	Stage 2: unfreeze last 6 transformer blocks + layernorm, lr=1e-5
+12	Labeled test eval with TTA — classification report + confusion matrix
+13	Per-class loss/accuracy bars + hardest misclassified images
+14	TTA submission on unlabeled test set → submission.csv
+Key design decisions:
+
+5 TTA views: center crop, hflip, random crop 80-100%, random crop + hflip, vflip — averaged softmax before argmax
+TTALabeledDataset loads raw PIL from base_ds.samples[test_idx] so all 5 transforms see the original image (not a pre-normalized tensor)
+Stage 2 unfreezes encoder.layer[-6:] — the last 6 of ViT-L's 24 blocks encode the high-level semantic features needed to distinguish workers-on-excavators
+
+
+stage 1: [10/20]  tr_loss=0.0008  tr_acc=0.9489  vl_loss=0.0006  vl_acc=0.9871  vl_f1=0.9874  36s  ← saved
+
+stage 2: [ 5/20]  tr_loss=0.0006  tr_acc=0.9641  vl_loss=0.0006  vl_acc=0.9936  vl_f1=0.9963  46s  ← saved
+
+=== Labeled Test Set Performance (TTA) ===
+              precision    recall  f1-score   support
+
+   excavator       0.99      0.98      0.99       129
+       train       1.00      1.00      1.00        21
+train_tracks       1.00      1.00      1.00        20
+     workers       0.99      0.99      0.99       141
+
+    accuracy                           0.99       311
+   macro avg       0.99      0.99      0.99       311
+weighted avg       0.99      0.99      0.99       311
+
+
+Confusion breakdown (row=true, col=predicted):
+              excavator  train  train_tracks  workers
+excavator           127      0             0        2
+train                 0     21             0        0
+train_tracks          0      0            20        0
+workers               1      0             0      140
+
+Misclassified pairs:
+  excavator → workers: 2
+  workers → excavator: 1
+
+
+  mean loss:
+  excavator    0.2981
+  train        0.0753
+  train_tracks 0.0559
+  workers      0.2838
+
+
+  Unlabeled test results: 0.98101 2nd place on leaderboard
+
+
+
+
+
+
+Cell 4 — TTA expanded from 5 → 10 views:
+
+Model MODEL_NAME  = 'facebook/dinov3-vitl16-pretrain-lvd1689m'
+path to notebok: /data/max/kaggle/railway/train_dinov3.ipynb
+
+
+#	View
+1	Center crop (original)
+2	HFlip
+3	VFlip
+4	HFlip + VFlip
+5	Tight crop (85–100%)
+6	Tight crop + HFlip
+7	Zoom-in crop (65–85%)
+8	Zoom-in + HFlip
+9	Rotate 90°
+10	Rotate 270°
+Cell 13 (new) — Stage 3: Unfreezes blocks 12–23 (vs. 18–23 in S2), trains for 15 epochs at lr=5e-6, saves to dinov3_s3_best.pth
+
+Cell 14 — predict_tta_ensemble(models, loader): Takes a list of (model, weight) tuples — averages weight × softmax across all models × all TTA views
+
+Cell 15 — Labeled eval: Loads both S2 and S3 checkpoints, weights 0.4/0.6 toward S3 (more fine-tuned), runs 10-view TTA ensemble
+
+Cell 17 — Submission: Same ensemble → submission_s2s3_ensemble_tta10.csv
+
+Run cells 10 → 11 → 12 → 13 (new Stage 3) → 14 → 15 → 17. If S3 hurts val accuracy vs S2, just change the ensemble weights to (0.5, 0.5) or (1.0, 0.0).
+
+
+losses:
+
+Stage 1: [10/20]  tr_loss=0.0008  tr_acc=0.9502  vl_loss=0.0006  vl_acc=0.9871  vl_f1=0.9874  32s  ← saved
+Stage 2: [ 5/20]  tr_loss=0.0006  tr_acc=0.9648  vl_loss=0.0006  vl_acc=0.9936  vl_f1=0.9963  49s  ← saved
+Stage 3:[ 2/15]  tr_loss=0.0006  tr_acc=0.9710  vl_loss=0.0006  vl_acc=0.9936  vl_f1=0.9963  60s  ← saved
+
+
+
+
+=== Labeled Test Set — S2+S3 Ensemble + 10-view TTA ===
+              precision    recall  f1-score   support
+
+   excavator       0.99      0.98      0.99       129
+       train       1.00      1.00      1.00        21
+train_tracks       1.00      1.00      1.00        20
+     workers       0.99      0.99      0.99       141
+
+    accuracy                           0.99       311
+   macro avg       0.99      0.99      0.99       311
+weighted avg       0.99      0.99      0.99       311
+
+Confusion breakdown (row=true, col=predicted):
+              excavator  train  train_tracks  workers
+excavator           127      0             0        2
+train                 0     21             0        0
+train_tracks          0      0            20        0
+workers               1      0             0      140
+
+Misclassified pairs:
+  excavator → workers: 2
+  workers → excavator: 1
+
+
+    Unlabeled test results: 0.98734 1st place on leaderboard
