@@ -2,7 +2,7 @@
 
 **Kaggle competition:** 4-class railway scene classification [Link](https://www.kaggle.com/competitions/i-ilia-029-lab-05-cnn-transfer-learning-for-image-classification/overview) 
 
-**Final leaderboard score:** 0.98734 — **1st place**
+**Public leaderboard score:** 0.98734 — **1st place**
 
 ---
 
